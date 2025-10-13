@@ -71,11 +71,17 @@ export async function pageRoute(req: HandlerRequest) {
         (k) => collPage.recordMap.collection_view[k]
       )[0];
 
+      const collPageBlock = collPage.recordMap.block[b!];
+      const collSpaceId = collPageBlock?.value?.space_id;
+      const collSiteId = collPageBlock?.value?.format?.site_id;
+
       const { rows, schema } = await getTableData(
         coll,
         collView.value.id,
         req.notionToken,
-        true
+        true,
+        collSpaceId,
+        collSiteId
       );
 
       const viewIds = (allBlocks[b] as any).value.view_ids as string[];

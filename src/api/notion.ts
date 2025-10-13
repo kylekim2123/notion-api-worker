@@ -13,6 +13,7 @@ interface INotionParams {
   resource: string;
   body: JSONData;
   notionToken?: string;
+  baseUrl?: string;
 }
 
 const loadPageChunkBody = {
@@ -26,8 +27,9 @@ const fetchNotionData = async <T extends any>({
   resource,
   body,
   notionToken,
+  baseUrl = NOTION_API,
 }: INotionParams): Promise<T> => {
-  const res = await fetch(`${NOTION_API}/${resource}`, {
+  const res = await fetch(`${baseUrl}/${resource}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -77,20 +79,32 @@ const queryCollectionBody = {
 export const fetchTableData = async (
   collectionId: string,
   collectionViewId: string,
-  notionToken?: string
+  notionToken?: string,
+  spaceId?: string,
+  siteId?: string
 ) => {
+  const apiBaseUrl = siteId
+    ? `https://${siteId}.notion.site/api/v3`
+    : spaceId
+    ? `https://www.notion.so/api/${spaceId}`
+    : NOTION_API;
+
+  const requestBody: JSONData = {
+    ...(spaceId ? { spaceId } : {}),
+    collection: {
+      id: collectionId,
+    },
+    collectionView: {
+      id: collectionViewId,
+    },
+    ...queryCollectionBody,
+  };
+
   const table = await fetchNotionData<CollectionData>({
     resource: "queryCollection",
-    body: {
-      collection: {
-        id: collectionId,
-      },
-      collectionView: {
-        id: collectionViewId,
-      },
-      ...queryCollectionBody,
-    },
+    body: requestBody,
     notionToken,
+    baseUrl: apiBaseUrl,
   });
 
   return table;

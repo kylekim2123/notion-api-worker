@@ -12,12 +12,16 @@ export const getTableData = async (
   collection: CollectionType,
   collectionViewId: string,
   notionToken?: string,
-  raw?: boolean
+  raw?: boolean,
+  spaceId?: string,
+  siteId?: string
 ) => {
   const table = await fetchTableData(
     collection.value.id,
     collectionViewId,
-    notionToken
+    notionToken,
+    spaceId,
+    siteId
   );
 
   const collectionRows = collection.value.schema;
@@ -77,10 +81,17 @@ export async function tableRoute(req: HandlerRequest) {
     (k) => page.recordMap.collection_view[k]
   )[0];
 
+  const pageBlock = page.recordMap.block[pageId!];
+  const spaceId = pageBlock?.value?.space_id;
+  const siteId = pageBlock?.value?.format?.site_id;
+
   const { rows } = await getTableData(
     collection,
     collectionView.value.id,
-    req.notionToken
+    req.notionToken,
+    false,
+    spaceId,
+    siteId
   );
 
   return createResponse(rows);
