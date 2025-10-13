@@ -8,6 +8,10 @@ export async function pageRoute(req: HandlerRequest) {
   const pageId = parsePageId(req.params.pageId);
   const page = await fetchPageById(pageId!, req.notionToken);
 
+  const pageBlock = page.recordMap.block[pageId!];
+  const spaceId = pageBlock?.value?.space_id;
+  const siteId = pageBlock?.value?.format?.site_id;
+
   const baseBlocks = page.recordMap.block;
 
   let allBlocks: { [id: string]: BlockType & { collection?: any } } = {
@@ -71,17 +75,13 @@ export async function pageRoute(req: HandlerRequest) {
         (k) => collPage.recordMap.collection_view[k]
       )[0];
 
-      const collPageBlock = collPage.recordMap.block[b!];
-      const collSpaceId = collPageBlock?.value?.space_id;
-      const collSiteId = collPageBlock?.value?.format?.site_id;
-
       const { rows, schema } = await getTableData(
         coll,
         collView.value.id,
         req.notionToken,
         true,
-        collSpaceId,
-        collSiteId
+        spaceId,
+        siteId
       );
 
       const viewIds = (allBlocks[b] as any).value.view_ids as string[];

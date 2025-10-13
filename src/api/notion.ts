@@ -29,11 +29,16 @@ const fetchNotionData = async <T extends any>({
   notionToken,
   baseUrl = NOTION_API,
 }: INotionParams): Promise<T> => {
-  const res = await fetch(`${baseUrl}/${resource}`, {
+  const url = `${baseUrl}/${resource}`;
+  
+  const spaceId = (body as any)?.spaceId;
+  
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       ...(notionToken && { cookie: `token_v2=${notionToken}` }),
+      ...(spaceId && { "x-notion-space-id": spaceId }),
     },
     body: JSON.stringify(body),
   });
@@ -85,8 +90,6 @@ export const fetchTableData = async (
 ) => {
   const apiBaseUrl = siteId
     ? `https://${siteId}.notion.site/api/v3`
-    : spaceId
-    ? `https://www.notion.so/api/${spaceId}`
     : NOTION_API;
 
   const requestBody: JSONData = {
