@@ -16,35 +16,41 @@ export const getTableData = async (
   spaceId?: string,
   siteId?: string
 ) => {
+  // Notion now double-nests each record as { value: { value: <block>, role } }.
+  // Unwrap to the actual value, falling back to the old single-nested shape.
+  const unwrap = (rec: any) => rec?.value?.value ?? rec?.value;
+  const collectionValue = unwrap(collection);
+
   const table = await fetchTableData(
-    collection.value.id,
+    collectionValue.id,
     collectionViewId,
     notionToken,
     spaceId,
     siteId
   );
 
-  const collectionRows = collection.value.schema;
+  const collectionRows = collectionValue.schema;
   const collectionColKeys = Object.keys(collectionRows);
 
   const tableArr: RowType[] = table.result.reducerResults.collection_group_results.blockIds.map(
     (id: string) => table.recordMap.block[id]
   );
 
-  const tableData = tableArr.filter(
-    (b) =>
-      b.value && b.value.properties && b.value.parent_id === collection.value.id
-  );
+  const tableData = tableArr.filter((b) => {
+    const v = unwrap(b);
+    return v && v.properties && v.parent_id === collectionValue.id;
+  });
 
   type Row = { id: string; [key: string]: RowContentType };
 
   const rows: Row[] = [];
 
   for (const td of tableData) {
-    let row: Row = { id: td.value.id };
+    const tv = unwrap(td);
+    let row: Row = { id: tv.id };
 
     for (const key of collectionColKeys) {
-      const val = td.value.properties[key];
+      const val = tv.properties[key];
       if (val) {
         const schema = collectionRows[key];
         row[schema.name] = raw ? val : getNotionValue(val, schema.type, td);

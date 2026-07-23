@@ -70,41 +70,47 @@ export async function pageRoute(req: HandlerRequest) {
     });
 
     for (let b of pendingCollections) {
-      const collPage = await fetchPageById(b!, req.notionToken);
+      // Collection/table enrichment is best-effort: never let it fail the
+      // whole page (the main content blocks must still be returned).
+      try {
+        const collPage = await fetchPageById(b!, req.notionToken);
 
-      const coll = Object.keys(collPage.recordMap.collection).map(
-        (k) => collPage.recordMap.collection[k]
-      )[0];
+        const coll = Object.keys(collPage.recordMap.collection).map(
+          (k) => collPage.recordMap.collection[k]
+        )[0];
 
-      const collView: {
-        value: { id: CollectionType["value"]["id"] };
-      } = Object.keys(collPage.recordMap.collection_view).map(
-        (k) => collPage.recordMap.collection_view[k]
-      )[0];
+        const collView: {
+          value: { id: CollectionType["value"]["id"] };
+        } = Object.keys(collPage.recordMap.collection_view).map(
+          (k) => collPage.recordMap.collection_view[k]
+        )[0];
 
-      const { rows, schema } = await getTableData(
-        coll,
-        collView.value.id,
-        req.notionToken,
-        true,
-        spaceId,
-        siteId
-      );
+        const { rows, schema } = await getTableData(
+          coll,
+          val(collView).id,
+          req.notionToken,
+          true,
+          spaceId,
+          siteId
+        );
 
-      const viewIds = val(allBlocks[b]).view_ids as string[];
+        const viewIds = val(allBlocks[b]).view_ids as string[];
 
-      allBlocks[b] = {
-        ...allBlocks[b],
-        collection: {
-          title: coll.value.name,
-          schema,
-          types: viewIds.map((id) => {
-            const col = collPage.recordMap.collection_view[id];
-            return col ? col.value : undefined;
-          }),
-          data: rows,
-        },
-      };
+        allBlocks[b] = {
+          ...allBlocks[b],
+          collection: {
+            title: val(coll).name,
+            schema,
+            types: viewIds.map((id) => {
+              const col = collPage.recordMap.collection_view[id];
+              return col ? val(col) : undefined;
+            }),
+            data: rows,
+          },
+        };
+      } catch (e) {
+        console.error("collection enrichment skipped for block " + b, e);
+      }
     }
   }
 
