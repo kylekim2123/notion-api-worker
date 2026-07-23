@@ -8,9 +8,13 @@ export async function pageRoute(req: HandlerRequest) {
   const pageId = parsePageId(req.params.pageId);
   const page = await fetchPageById(pageId!, req.notionToken);
 
+  // Notion now double-nests each record as { value: { value: <block>, role } }.
+  // Unwrap to the actual block, falling back to the old single-nested shape.
+  const val = (rec: any) => rec?.value?.value ?? rec?.value;
+
   const pageBlock = page.recordMap.block[pageId!];
-  const spaceId = pageBlock?.value?.space_id;
-  const siteId = pageBlock?.value?.format?.site_id;
+  const spaceId = val(pageBlock)?.space_id;
+  const siteId = val(pageBlock)?.format?.site_id;
 
   const baseBlocks = page.recordMap.block;
 
@@ -23,10 +27,10 @@ export async function pageRoute(req: HandlerRequest) {
     allBlockKeys = Object.keys(allBlocks);
 
     const pendingBlocks = allBlockKeys.flatMap((blockId) => {
-      const block = allBlocks[blockId];
-      const content = block.value && block.value.content;
+      const block = val(allBlocks[blockId]);
+      const content = block && block.content;
 
-      if (!content || (block.value.type === "page" && blockId !== pageId!)) {
+      if (!content || (block.type === "page" && blockId !== pageId!)) {
         // skips pages other than the requested page
         return [];
       }
@@ -38,9 +42,12 @@ export async function pageRoute(req: HandlerRequest) {
       break;
     }
 
-    const newBlocks = await fetchBlocks(pendingBlocks, req.notionToken).then(
-      (res) => res.recordMap.block
-    );
+    // Batch to avoid oversized syncRecordValues requests on large pages.
+    const newBlocks: { [id: string]: BlockType } = {};
+    for (let i = 0; i < pendingBlocks.length; i += 100) {
+      const res = await fetchBlocks(pendingBlocks.slice(i, i + 100), req.notionToken);
+      Object.assign(newBlocks, res.recordMap.block);
+    }
 
     allBlocks = { ...allBlocks, ...newBlocks };
   }
@@ -57,9 +64,9 @@ export async function pageRoute(req: HandlerRequest) {
 
   if (collection && collectionView) {
     const pendingCollections = allBlockKeys.flatMap((blockId) => {
-      const block = allBlocks[blockId];
+      const b = val(allBlocks[blockId]);
 
-      return (block.value && block.value.type === "collection_view") ? [block.value.id] : [];
+      return (b && b.type === "collection_view") ? [b.id] : [];
     });
 
     for (let b of pendingCollections) {
@@ -84,7 +91,7 @@ export async function pageRoute(req: HandlerRequest) {
         siteId
       );
 
-      const viewIds = (allBlocks[b] as any).value.view_ids as string[];
+      const viewIds = val(allBlocks[b]).view_ids as string[];
 
       allBlocks[b] = {
         ...allBlocks[b],
