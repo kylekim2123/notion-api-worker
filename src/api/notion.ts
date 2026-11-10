@@ -23,6 +23,79 @@ const loadPageChunkBody = {
   verticalColumns: false,
 };
 
+// 에러에 담을 노션 응답 본문의 최대 길이
+const BODY_SNIPPET_MAX_LENGTH = 200;
+
+// Cloudflare가 호출 제한 시 돌려주는 평문 본문의 표식
+const RATE_LIMIT_BODY_MARKER = "error code: 1015";
+
+interface NotionApiErrorParams {
+  resource: string;
+  status: number;
+  isRateLimited: boolean;
+  retryAfterSeconds: number | null;
+  bodySnippet: string;
+  reason: string;
+}
+
+/**
+ * 노션 API가 실패 상태를 돌려주거나 JSON이 아닌 응답을 줄 때 던지는 에러.
+ * index.ts가 이 에러를 보고 503(호출 제한) 또는 502(그 밖의 노션 오류)로 바꾼다.
+ */
+export class NotionApiError extends Error {
+  readonly resource: string;
+  readonly status: number;
+  readonly isRateLimited: boolean;
+  readonly retryAfterSeconds: number | null;
+  readonly bodySnippet: string;
+
+  constructor(params: NotionApiErrorParams) {
+    super(
+      `Notion API ${params.resource} 실패 (status=${params.status}): ${params.reason}`
+    );
+    this.name = "NotionApiError";
+    this.resource = params.resource;
+    this.status = params.status;
+    this.isRateLimited = params.isRateLimited;
+    this.retryAfterSeconds = params.retryAfterSeconds;
+    this.bodySnippet = params.bodySnippet;
+  }
+}
+
+/**
+ * 요청한 페이지를 읽을 수 없을 때 던지는 에러(웹 미게시, 삭제, 존재하지 않음).
+ * 노션은 이런 경우에도 200과 권한 없음 레코드({ role: "none" })를 주므로 직접 판정한다.
+ * index.ts가 이 에러를 404로 바꾼다.
+ */
+export class NotionPageNotAccessibleError extends Error {
+  readonly pageId: string;
+
+  constructor(pageId: string, reason: string) {
+    super(`노션 페이지 ${pageId}를 읽을 수 없음: ${reason}`);
+    this.name = "NotionPageNotAccessibleError";
+    this.pageId = pageId;
+  }
+}
+
+// Retry-After 헤더를 초 단위로 읽는다. 초 숫자와 HTTP 날짜 형식을 모두 받고, 없거나 읽을 수 없으면 null.
+const parseRetryAfter = (value: string | null): number | null => {
+  if (value === null || value.trim() === "") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) {
+    return null;
+  }
+
+  return Math.max(0, Math.ceil((date - Date.now()) / 1000));
+};
+
 const fetchNotionData = async <T extends any>({
   resource,
   body,
@@ -43,7 +116,34 @@ const fetchNotionData = async <T extends any>({
     body: JSON.stringify(body),
   });
 
-  return res.json();
+  // 본문은 한 번만 읽을 수 있으므로 텍스트로 받아 두고 검증 후 직접 파싱한다.
+  const text = await res.text();
+  const contentType = res.headers.get("content-type") || "";
+
+  const createError = (reason: string) =>
+    new NotionApiError({
+      resource,
+      status: res.status,
+      isRateLimited:
+        res.status === 429 || text.includes(RATE_LIMIT_BODY_MARKER),
+      retryAfterSeconds: parseRetryAfter(res.headers.get("retry-after")),
+      bodySnippet: text.slice(0, BODY_SNIPPET_MAX_LENGTH),
+      reason,
+    });
+
+  if (!res.ok) {
+    throw createError("HTTP 상태가 2xx가 아님");
+  }
+
+  if (!contentType.toLowerCase().includes("json")) {
+    throw createError(`JSON이 아닌 Content-Type(${contentType || "없음"})`);
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch (e) {
+    throw createError("JSON 파싱 실패");
+  }
 };
 
 export const fetchPageById = async (pageId: string, notionToken?: string) => {

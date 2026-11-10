@@ -1,8 +1,33 @@
-import { fetchPageById, fetchBlocks } from "../api/notion";
+import {
+  fetchPageById,
+  fetchBlocks,
+  NotionApiError,
+  NotionPageNotAccessibleError,
+} from "../api/notion";
 import { parsePageId } from "../api/utils";
 import { createResponse } from "../response";
-import { getTableData } from "./table";
-import { BlockType, CollectionType, HandlerRequest } from "../api/types";
+import { BlockType, HandlerRequest } from "../api/types";
+
+// 응답의 블록 맵을 꺼낸다. recordMap 자체가 없으면 형식이 깨진 응답으로 보고 502로 알린다.
+// 노션은 읽을 수 있는 블록이 하나도 없으면 block 키를 아예 빼고
+// { recordMap: { __version__: 3 } }를 주므로, 이때는 빈 블록 맵으로 취급한다.
+const getBlockMap = (
+  data: any,
+  resource: string
+): { [id: string]: BlockType } => {
+  if (!data || !data.recordMap) {
+    throw new NotionApiError({
+      resource,
+      status: 200,
+      isRateLimited: false,
+      retryAfterSeconds: null,
+      bodySnippet: (JSON.stringify(data) || "").slice(0, 200),
+      reason: "recordMap이 없는 응답",
+    });
+  }
+
+  return data.recordMap.block || {};
+};
 
 export async function pageRoute(req: HandlerRequest) {
   const pageId = parsePageId(req.params.pageId);
@@ -12,21 +37,44 @@ export async function pageRoute(req: HandlerRequest) {
   // Unwrap to the actual block, falling back to the old single-nested shape.
   const val = (rec: any) => rec?.value?.value ?? rec?.value;
 
-  const pageBlock = page.recordMap.block[pageId!];
-  const spaceId = val(pageBlock)?.space_id;
-  const siteId = val(pageBlock)?.format?.site_id;
+  const baseBlocks = getBlockMap(page, "loadPageChunk");
 
-  const baseBlocks = page.recordMap.block;
+  // 요청한 페이지 블록 하나만 판정한다. 하위 블록의 role: none은 그대로 둔다.
+  const requestedPage = val(baseBlocks[pageId!]);
+  if (!requestedPage) {
+    throw new NotionPageNotAccessibleError(
+      pageId!,
+      "페이지 블록이 응답에 없음"
+    );
+  }
+  if (!requestedPage.id || !requestedPage.type) {
+    throw new NotionPageNotAccessibleError(
+      pageId!,
+      "id나 type이 없는 레코드(권한 없음, 웹 미게시)"
+    );
+  }
+  if (requestedPage.alive === false) {
+    throw new NotionPageNotAccessibleError(
+      pageId!,
+      "삭제된 페이지(alive: false)"
+    );
+  }
 
-  let allBlocks: { [id: string]: BlockType & { collection?: any } } = {
+  // 조상 collection_view(인라인 DB) 블록은 받은 그대로 둔다. react-notion-x가
+  // block.collection을 읽지 않으므로 DB를 다시 조회해 행을 붙이지 않는다(호출 수 절감).
+  let allBlocks: { [id: string]: BlockType } = {
     ...baseBlocks,
   };
-  let allBlockKeys;
+
+  // 한 번 요청한 블록 id. 요청했는데 오지 않은 블록을 다시 요청하면 루프가 끝나지 않고
+  // 같은 호출이 반복돼 호출 제한을 부르므로, 다음 회차에서는 빼낸다.
+  const requestedBlockIds = new Set<string>();
+  let missingBlockCount = 0;
 
   while (true) {
-    allBlockKeys = Object.keys(allBlocks);
+    const allBlockKeys = Object.keys(allBlocks);
 
-    const pendingBlocks = allBlockKeys.flatMap((blockId) => {
+    const pendingBlockIds = allBlockKeys.flatMap((blockId) => {
       const block = val(allBlocks[blockId]);
       const content = block && block.content;
 
@@ -35,8 +83,13 @@ export async function pageRoute(req: HandlerRequest) {
         return [];
       }
 
-      return content.filter((id: string) => !allBlocks[id]);
+      return content.filter(
+        (id: string) => !allBlocks[id] && !requestedBlockIds.has(id)
+      );
     });
+
+    // 여러 블록이 같은 하위 블록을 가리켜도 한 번만 요청한다.
+    const pendingBlocks = Array.from(new Set<string>(pendingBlockIds));
 
     if (!pendingBlocks.length) {
       break;
@@ -45,73 +98,22 @@ export async function pageRoute(req: HandlerRequest) {
     // Batch to avoid oversized syncRecordValues requests on large pages.
     const newBlocks: { [id: string]: BlockType } = {};
     for (let i = 0; i < pendingBlocks.length; i += 100) {
-      const res = await fetchBlocks(pendingBlocks.slice(i, i + 100), req.notionToken);
-      Object.assign(newBlocks, res.recordMap.block);
+      const batch = pendingBlocks.slice(i, i + 100);
+      batch.forEach((id) => requestedBlockIds.add(id));
+      const res = await fetchBlocks(batch, req.notionToken);
+      // block 키가 없으면 이번 회차에 받은 블록 0개로 보고 누락 수에 더한다.
+      Object.assign(newBlocks, getBlockMap(res, "syncRecordValues"));
     }
 
+    missingBlockCount += pendingBlocks.filter((id) => !newBlocks[id]).length;
     allBlocks = { ...allBlocks, ...newBlocks };
   }
 
-  const collection = page.recordMap.collection
-    ? page.recordMap.collection[Object.keys(page.recordMap.collection)[0]]
-    : null;
-
-  const collectionView = page.recordMap.collection_view
-    ? page.recordMap.collection_view[
-        Object.keys(page.recordMap.collection_view)[0]
-      ]
-    : null;
-
-  if (collection && collectionView) {
-    const pendingCollections = allBlockKeys.flatMap((blockId) => {
-      const b = val(allBlocks[blockId]);
-
-      return (b && b.type === "collection_view") ? [b.id] : [];
-    });
-
-    for (let b of pendingCollections) {
-      // Collection/table enrichment is best-effort: never let it fail the
-      // whole page (the main content blocks must still be returned).
-      try {
-        const collPage = await fetchPageById(b!, req.notionToken);
-
-        const coll = Object.keys(collPage.recordMap.collection).map(
-          (k) => collPage.recordMap.collection[k]
-        )[0];
-
-        const collView: {
-          value: { id: CollectionType["value"]["id"] };
-        } = Object.keys(collPage.recordMap.collection_view).map(
-          (k) => collPage.recordMap.collection_view[k]
-        )[0];
-
-        const { rows, schema } = await getTableData(
-          coll,
-          val(collView).id,
-          req.notionToken,
-          true,
-          spaceId,
-          siteId
-        );
-
-        const viewIds = val(allBlocks[b]).view_ids as string[];
-
-        allBlocks[b] = {
-          ...allBlocks[b],
-          collection: {
-            title: val(coll).name,
-            schema,
-            types: viewIds.map((id) => {
-              const col = collPage.recordMap.collection_view[id];
-              return col ? val(col) : undefined;
-            }),
-            data: rows,
-          },
-        };
-      } catch (e) {
-        console.error("collection enrichment skipped for block " + b, e);
-      }
-    }
+  // 받지 못한 블록은 빼고 받은 블록만으로 응답한다.
+  if (missingBlockCount > 0) {
+    console.warn(
+      `[notion-api-worker] syncRecordValues 누락 블록 pageId=${pageId} missing=${missingBlockCount}`
+    );
   }
 
   return createResponse(allBlocks);

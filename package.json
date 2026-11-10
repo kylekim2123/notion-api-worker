@@ -7,7 +7,8 @@
     "build": "webpack",
     "dev": "wrangler dev",
     "preview": "wrangler preview",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
   },
   "dependencies": {
     "tiny-request-router": "^1.2.2"
@@ -18,6 +19,8 @@
     "prettier": "^3.4.2",
     "ts-loader": "^9.5.1",
     "typescript": "^5.7.2",
+    "vite": "^8.3.7",
+    "vitest": "^5.1.0",
     "webpack": "^5.97.1",
     "webpack-cli": "^5.1.4",
     "wrangler": "^3.95.0"
